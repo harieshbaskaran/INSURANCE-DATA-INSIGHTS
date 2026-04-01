@@ -1,0 +1,90 @@
+------------- DATABASE
+USE DATABASE ABCD_DB;
+
+------------SCHEMA
+USE SCHEMA RAW_ABC_SCHEMA;
+
+------------STAGE
+CREATE OR REPLACE STAGE ABC_JSON_STAGE;
+-------------------------------------------------------------------------------------------------------------------------------------------
+----------FILE FORMAT
+CREATE OR REPLACE FILE FORMAT JSON_FILE_FORMAT
+TYPE = 'JSON'
+STRIP_OUTER_ARRAY = FALSE;
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+-----------TABLES
+CREATE OR REPLACE TABLE RAW_AGENTS(
+RAW VARIANT,
+
+loaded_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+source_file        STRING
+);
+
+CREATE OR REPLACE TABLE RAW_RISK(
+RAW VARIANT,
+
+loaded_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+source_file        STRING
+);
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+--------COPY INTO LOAD FROM STAGE TO TABLE
+COPY INTO RAW_AGENTS (RAW,source_file)
+FROM
+(SELECT $1,METADATA$FILENAME
+FROM @ABC_JSON_STAGE/agents_data_jdjon)
+FILE_FORMAT = (FORMAT_NAME = 'JSON_FILE_FORMAT');
+
+
+COPY INTO RAW_RISK (RAW,source_file)
+FROM
+(SELECT $1,METADATA$FILENAME
+FROM @ABC_JSON_STAGE/agents_data_jdjon)
+FILE_FORMAT = (FORMAT_NAME = 'JSON_FILE_FORMAT');
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+MERGE INTO SILVER_AGENT AS target
+USING (
+    SELECT
+        UPPER(TRIM(RAW:agent_id::STRING))         AS agent_id,
+        INITCAP(TRIM(RAW:agent_name::STRING))     AS agent_name,
+        INITCAP(TRIM(RAW:region::STRING))         AS region,
+        LOWER(TRIM(RAW:email::STRING))            AS email,
+        TRIM(RAW:phone::STRING)                   AS phone,
+        UPPER(TRIM(RAW:license_status::STRING))   AS license_status,
+        TRY_TO_DATE(RAW:joining_date::STRING)     AS joining_date,
+        UPPER(TRIM(RAW:branch_code::STRING))      AS branch_code
+    FROM BRONZE_AGENT_RAW
+    WHERE RAW:agent_id IS NOT NULL
+
+    QUALIFY
+        ROW_NUMBER() OVER (
+            PARTITION BY RAW:agent_id::STRING
+            ORDER BY TRY_TO_DATE(RAW:joining_date::STRING) DESC
+        ) = 1
+) AS source
+
+ON target.agent_id = source.agent_id
+
+WHEN MATCHED THEN UPDATE SET
+    target.agent_name      = source.agent_name,
+    target.region          = source.region,
+    target.email           = source.email,
+    target.phone           = source.phone,
+    target.license_status  = source.license_status,
+    target.joining_date    = source.joining_date,
+    target.branch_code     = source.branch_code,
+    target.updated_at      = CURRENT_TIMESTAMP()
+
+WHEN NOT MATCHED THEN INSERT (
+    agent_id, agent_name, region, email,
+    phone, license_status, joining_date, branch_code
+)
+VALUES (
+    source.agent_id, source.agent_name, source.region,
+    source.email, source.phone, source.license_status,
+    source.joining_date, source.branch_code
+);
+
+
